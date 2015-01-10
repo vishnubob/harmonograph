@@ -4,9 +4,39 @@ import random
 import math
 import time
 import os
+import argparse
 
-background_colour = (0, 0, 0)
-(width, height) = (500, 500)
+try:
+    import pygame
+except ImportError:
+    msg = "Warning: no pygame module available"
+    print msg
+
+try:
+    import silhouette
+    units = silhouette.units
+except ImportError:
+    msg = "Warning: no silhouette module available"
+    print msg
+    from pint import UnitRegistry
+    units = UnitRegistry()
+
+units.define('pixel = point * 0.75 = pixels = px')
+
+Defaults = {
+    "center_x": None,
+    "center_y": None,
+    "width": "6in", 
+    "height": "6in",
+    "speed": 10,
+    "pressure": 10,
+    "resolution": 20,
+    "threshold": 1,
+    "steps": 30,
+    "tsmin": 0,
+    "tsmax": None,
+    "mode": "svg",
+}
 
 def euclidean_distance(xy1, xy2):
     return math.sqrt((xy1[0] - xy2[0]) ** 2 + (xy1[1] - xy2[1]) ** 2)
@@ -113,51 +143,108 @@ class DistanceStop(object):
         #return sum(self.values) < self.threshold
 
 class HarmonographRender(object):
-    def __init__(self, factory):
-        self.factory = factory
+    DefaultUnit = "pixel"
 
-    def reset(self, seed=None):
-        if seed == None:
+    def __init__(self, factory, args):
+        self.factory = factory
+        self.args = args
+
+    def _convert_unit(self, expr):
+        val = units.parse_expression(expr)
+        to_unit = units[self.DefaultUnit]
+        return val.to(to_unit).magnitude
+
+    @property
+    def dimensions(self):
+        x = self.args["width"]
+        y = self.args["height"]
+        (x, y) = (self._convert_unit(x), self._convert_unit(y))
+        return map(int, (x, y))
+    
+    @property
+    def center(self):
+        x = self.args["center_x"]
+        y = self.args["center_y"]
+        if (x == None) or (y == None):
+            (dx, dy) = self.dimensions
+            return map(int, (dx / 2.0, dy / 2.0))
+        (x, y) = (self._convert_unit(x), self._convert_unit(y))
+        return map(int, (x, y))
+    
+    def reset(self):
+        self.seed = self.args["seed"]
+        if self.seed == None:
             random.seed()
             self.seed = random_word()
         random.seed(self.seed)
         self.engine = self.factory()
 
-    def generate(self, resolution=20, threshold=1, steps=30):
+    def generate(self):
+        print "Generating %s" % self.seed
+        resolution = self.args["resolution"]
+        threshold = self.args["threshold"]
+        steps = self.args["steps"]
         resolution = self.engine.calibrate(resolution)
         step = 0
         dstep = DistanceStop(steps, threshold)
-        print "Generating %s" % self.seed
-        while True:
-            ts = resolution * step
+        running = True
+        while running:
+            ts = resolution * step + self.args["tsmin"]
             step += 1
             pos = self.engine(ts)
-            if dstep.test(pos):
-                print "Generated %d points" % step
-                raise StopIteration
             yield pos
+            if self.args["tsmax"] != None:
+                running = ts < self.args["tsmax"]
+            else:
+                running = dstep.test(pos)
+        print "Generated %d points (resolution: %f, timestamp: %f)" % (step, resolution, ts)
 
-    def render(self, seed=None, *args, **kw):
-        self.reset(seed)
-        return self.generate(*args, **kw)
+    def scale_path(self, path):
+        (dx, dy) = self.dimensions
+        (cx, cy) = self.center
+        (x_list, y_list) = zip(*path)
+        x_min = min(x_list)
+        x_max = max(x_list)
+        y_min = min(y_list)
+        y_max = max(y_list)
+        x_scale = dx / (x_max - x_min)
+        y_scale = dy / (y_max - y_min)
+        x_offset = cx - (dx / 2.0)
+        y_offset = cy - (dy / 2.0)
+        x_list = [int((x - x_min) * x_scale + x_offset) for x in x_list]
+        y_list = [int((y - y_min) * y_scale + y_offset) for y in y_list]
+        return zip(x_list, y_list)
+
+    def render(self):
+        self.reset()
+        path = self.generate()
+        path = list(path)
+        path = self.scale_path(path)
+        return path
 
 class SVG_Render(HarmonographRender):
     SVG_Template = \
 """<?xml version="1.0" encoding="utf-8" ?>
-<svg baseProfile="tiny" height="100%%" version="1.2" width="100%%" xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events" xmlns:xlink="http://www.w3.org/1999/xlink"><defs />
-    <path d="%s" fill="white" stroke="black" stroke-width="0.1" />
+<svg width="%(width)s" height="%(height)s" version="1.2" xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <defs />
+    <path d="%(path)s" fill="white" stroke="black" stroke-width="0.1" />
 </svg>
 """
     
-    def render(self, *args, **kw):
-        path = super(SVG_Render, self).render(*args, **kw)
+    def render(self):
+        path = super(SVG_Render, self).render()
         path = 'M ' + str.join(' L ', ["%d %d" % pos for pos in path])
         print "Saving %s" % self.seed
         self.save(path)
         self.view()
 
     def save(self, path):
-        svg = self.SVG_Template % path
+        macros = {}
+        (dx, dy) = self.dimensions
+        macros["width"] = dx
+        macros["height"] = dy
+        macros["path"] = path
+        svg = self.SVG_Template % macros
         svgfn = "%s.svg" % self.seed
         f = open(svgfn, 'w')
         f.write(svg)
@@ -167,50 +254,87 @@ class SVG_Render(HarmonographRender):
         cmd = "open %s" % svgfn
         os.system(cmd)
 
-class PygameRender(object):
-    BackgroundColor = (0, 0, 0)
+class PygameRender(HarmonographRender):
+    BackgroundColor = (0xff, 0xff, 0xff)
+    ForegroundColor = (0, 0, 0)
 
-    def __init__(self, factory):
-        self.factory = factory
-        self.screen = pygame.display.set_mode((width, height))
+    def render(self):
+        dim = self.dimensions
+        screen = pygame.display.set_mode(dim)
         pygame.display.set_caption('harmnograph')
+        running = True
+        while running:
+            self.engine = self.factory()
+            screen.fill(self.BackgroundColor)
+            path = super(PygameRender, self).render()
+            pygame.draw.aalines(screen, self.ForegroundColor, False, path)
+            pygame.display.flip()
+            eloop = True
+            while eloop:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
+                        eloop = False
+                        break
+                    if event.type == pygame.MOUSEBUTTONDOWN:
+                        eloop = False
+                        break
 
-    def reset(self):
-        self.pixel_hash = {}
-        self.engine = self.factory()
-        self.lastpos = None
-        self.timestamp = 0
-        self.screen.fill(self.BackgroundColor)
+class SilhouetteRender(HarmonographRender):
+    DefaultUnit = "steps"
 
-    def run(self):
-        self.reset()
-        self.running = True
-        step = self.engine.calibrate()
-        while self.running:
-            pos = self.engine(self.timestamp)
-            #self.timestamp += .01
-            self.timestamp += step
-            if pos not in self.pixel_hash:
-                self.pixel_hash[pos] = 0
-            if self.lastpos and pos != self.lastpos:
-                self.pixel_hash[pos] += 1
-                color = [self.pixel_hash[pos] * 50] * 3
-                self.screen.set_at(pos, color)
-                #pygame.draw.line(self.screen, color, self.lastpos, pos)
-                pygame.display.flip()
-            self.lastpos = pos
+    def init_cutter(self):
+        self.cutter = silhouette.Silhouette()
+        self.cutter.connect()
+        self.cutter.speed = self.args["speed"]
+        self.cutter.pressure = self.args["pressure"]
+        self.cutter.home()
 
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                if event.type == pygame.MOUSEBUTTONDOWN:
-                    self.reset()
+    def render(self):
+        path = super(SilhouetteRender, self).render()
+        self.init_cutter()
+        self.cutter.position = path[0]
+        self.cutter.draw(path)
+        self.cutter.home()
 
-factory = FactoryAlpha()
-if 0:
-    import pygame
-    pr = PygameRender(factory)
-    pr.run()
-if 1:
-    pr = SVG_Render(factory)
-    pr.render()
+def cli():
+    parser = argparse.ArgumentParser(description='Harmonograph Generator')
+    parser.add_argument('-x', '--center-x', type=str, help='X center (1.2in, 3mm, etc)')
+    parser.add_argument('-y', '--center-y', type=str, help='Y center (1.2in, 3mm, etc)')
+    parser.add_argument('-W', '--width', type=str, help='Width')
+    parser.add_argument('-H', '--height', type=str, help='Height')
+    parser.add_argument('-p', '--pressure', type=int, help='Pressure of pen (1-33)')
+    parser.add_argument('--speed', type=int, help='Speed of pen (1-33)')
+    parser.add_argument('-m', '--mode', type=str, help='Mode (svg, silhouete, pygame)')
+    parser.add_argument('-s', '--seed', type=str, help='Seed')
+    parser.add_argument('-r', '--resolution', type=float, help='resolution')
+    parser.add_argument('-t', '--threshold', type=float, help='threshold')
+    parser.add_argument('-S', '--steps', type=int, help='steps')
+    parser.add_argument('--tsmin', type=float, help='timestamp start')
+    parser.add_argument('--tsmax', type=float, help='timestamp max')
+    parser.set_defaults(**Defaults)
+    args = parser.parse_args()
+    return args
+
+def get_factory(args):
+    factory = FactoryAlpha()
+    return factory
+
+def run(args):
+    global pygame, silhouette
+    factory = get_factory(args)
+    if args["mode"] == "silhouette":
+        mode = SilhouetteRender(factory, args)
+    elif args["mode"] == "pygame":
+        mode = PygameRender(factory, args)
+    elif args["mode"] == "svg":
+        mode = SVG_Render(factory, args)
+    else:
+        msg = "Unknown mode: %s" % args["mode"]
+        raise RuntimeError(msg)
+    mode.render()
+
+if __name__ == '__main__':
+    args = cli()
+    args = args.__dict__.copy()
+    run(args)
