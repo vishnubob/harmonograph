@@ -196,7 +196,7 @@ class HarmonographRender(object):
             if self.args["tsmax"] != None:
                 running = ts < self.args["tsmax"]
             else:
-                running = dstep.test(pos)
+                running = not dstep.test(pos)
         print "Generated %d points (resolution: %f, timestamp: %f)" % (step, resolution, ts)
 
     def scale_path(self, path):
@@ -283,17 +283,18 @@ class PygameRender(HarmonographRender):
 class SilhouetteRender(HarmonographRender):
     DefaultUnit = "steps"
 
-    def init_cutter(self):
+    def init_cutter(self, pos):
         self.cutter = silhouette.Silhouette()
         self.cutter.connect()
+        self.cutter.home()
+        self.cutter.position = pos
         self.cutter.speed = self.args["speed"]
         self.cutter.pressure = self.args["pressure"]
-        self.cutter.home()
 
     def render(self):
         path = super(SilhouetteRender, self).render()
-        self.init_cutter()
-        self.cutter.position = path[0]
+        raw_input("Press enter to continue")
+        self.init_cutter(path[0])
         self.cutter.draw(path)
         self.cutter.home()
 
