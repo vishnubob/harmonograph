@@ -1,0 +1,2 @@
+#!/bin/sh
+python harmnograph.py -W 10in -H 10in -x 6in -y 6in -s despotist --tsmax 1000 --speed 10 --pressure 1 -m silhouette -r 4
